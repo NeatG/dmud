@@ -1,29 +1,41 @@
 import std.stdio;
 import std.socket;
-
+import std.algorithm;
+class Client {
+ Socket socket;
+ this (Socket sock) {
+  this.socket = sock;
+ }
+}
 void main() {
     Socket server = new TcpSocket();
-    server.setOption(SocketOptionLevel.SOCKET, 
-SocketOption.REUSEADDR, true);
+    server.setOption(SocketOptionLevel.SOCKET, SocketOption.REUSEADDR, true);
+    server.blocking(false);
     server.bind(new InternetAddress(8080));
     server.listen(1);
-
+	SocketSet checkRead = new SocketSet();
+    Socket[] clients;
     while(true) {
+	  checkRead.reset(); //Reset checkRead and add server socket
+	  checkRead.add(server);
+	  if (Socket.select(checkRead,null,null,dur!"hnsecs"(0)) > 0) {
         Socket client = server.accept();
-
-        char[1024] buffer;
-        auto received = client.receive(buffer);
-
-        writefln("The client said:\n%s", buffer[0.. received]);
-
-        enum header =
-            "HTTP/1.0 200 OK\nContent-Type: text/html; 
-charset=utf-8\n\n";
-
-        string response = header ~ "Hello World!\n";
-        client.send(response);
-
-        client.shutdown(SocketShutdown.BOTH);
-        client.close();
+		clients ~= client;
+		writefln("Client connected!");
+	  }
+	  foreach (int i, Socket c; clients) {
+	   checkRead.reset();
+	   checkRead.add(c);
+	   if (Socket.select(checkRead,null,null,dur!"hnsecs"(0)) > 0) {
+	    char[1024] buffer;
+        auto received = c.receive(buffer);
+		if (received == 0) { //They closed the connection
+		 writefln("Removing %d",i);
+		 clients = remove(clients,i);
+		} else {
+	     writefln("The client said:\n%s", buffer[0.. received]);
+		}
+	   }
+	  }
     }
 }
