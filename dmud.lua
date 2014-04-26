@@ -7,6 +7,9 @@ function DMUD_ClientDisconnected(client)
 end
 function DMUD_ClientConnected(client)
  print("Client Connected! "..client)
- sendToClient(client,"HTTP/1.0 200 OK\nContent-Type: text/html; charset=utf-8\n\nHello World!\n")
+ --sendToClient(client,"HTTP/1.0 200 OK\nContent-Type: text/html; charset=utf-8\n\nHello World!\n")
  --disconnectClient(client);
+end
+function DMUD_Heartbeat(client)
+ sendToClient(client,"Hey how's it going!?")
 end
