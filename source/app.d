@@ -15,10 +15,15 @@ immutable char SE = 240; //Subnegotiation end
 immutable char WILL = 251;
 immutable char DO = 253;
 immutable char MCCP = 86;
+immutable char MXP = 91;
+immutable char GMCP = 201;
+
 
 class Client {
     Socket socket;
     bool mccp = false;
+    bool mxp = false;
+    bool gmcp = false;
     Compress mccpCompressor;
     char[] toSend = "".dup;
     this (Socket sock) {
@@ -98,6 +103,8 @@ EOS");
     	    clients[clientCount] = new Client(client);
     	    DMUD_ClientConnected(clientCount);
     	    clients[clientCount].send([IAC,WILL,MCCP]);
+    	    clients[clientCount].send([IAC,WILL,MXP]);
+    	    clients[clientCount].send([IAC,WILL,GMCP]);
 	    }
 	    foreach (int key, Client c; clients) {
 	        checkRead.reset();
@@ -124,6 +131,14 @@ EOS");
                                         clients[key].send([IAC,SB,MCCP,IAC,SE]);
                                         clients[key].mccpCompressor = new Compress;
                                         clients[key].mccp = true;
+                                    }
+                                    else if (buffer[i+2] == MXP) { //IAC DO MXP
+                                        clients[key].send([IAC,SB,MXP,IAC,SE]);
+                                        clients[key].mxp = true;
+                                    }
+                                    else if (buffer[i+2] == GMCP) {
+                                        clients[key].send([IAC,SB,GMCP,IAC,SE]);
+                                        clients[key].gmcp = true;                                        
                                     }
                                 }
                                 

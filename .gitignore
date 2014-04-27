@@ -1,0 +1,6 @@
+.buildpath
+*.exe
+.dub/build/application-debug-windows-x86-dmd-92D2A07300E43E1D108494F0087B7106/dmud.obj
+.dub/dub.json
+test.txt
+.settings/org.dsource.ddt.ide.core.prefs
