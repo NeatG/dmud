@@ -4,6 +4,8 @@
 	"copyright": "Copyright © 2014, NeatG",
 	"authors": ["NeatG"],
 	"dependencies": {
-	 "luad": "~master"
-	}
+		"luad": "~master",
+		"d2sqlite3": ">=0.1.0"
+	},
+	"libs": ["sqlite3"],
 }

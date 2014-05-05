@@ -4,3 +4,5 @@
 .dub/dub.json
 test.txt
 .settings/org.dsource.ddt.ide.core.prefs
+*.obj
+*.db

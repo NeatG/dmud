@@ -5,19 +5,24 @@ import std.file;
 import std.datetime;
 import std.format;
 import std.zlib;
+import std.digest.sha;
 import core.thread;
 import luad.all;
+import d2sqlite3;
 Client[int] clients;
 const Duration instant = dur!"hnsecs"(0);
 immutable char IAC = 255;
+immutable char CR = 13;
+immutable char LF = 10;
 immutable char SB = 250; //Subnegotiation begin
 immutable char SE = 240; //Subnegotiation end
 immutable char WILL = 251;
 immutable char DO = 253;
+immutable char DONT = 254;
 immutable char MCCP = 86;
 immutable char MXP = 91;
 immutable char GMCP = 201;
-
+string[string] keyValue;
 
 class Client {
     Socket socket;
@@ -26,6 +31,7 @@ class Client {
     bool gmcp = false;
     Compress mccpCompressor;
     char[] toSend = "".dup;
+    char[] toRecv = "".dup;
     this (Socket sock) {
         this.socket = sock;
     }
@@ -47,6 +53,30 @@ void main() {
     auto lua = new LuaState; //Create the Lua state and initialize the libraries
     lua.openLibs();
     int lastModifiedTimeLua = 0; //MTime for the Lua file
+    Database db;
+    try
+    {
+        db = Database("dmud.db");
+    }
+    catch (SqliteException e)
+    {
+        // Error creating the database
+        assert(false, "Error: " ~ e.msg);
+    }
+    try //Create our key/value store.
+    {
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS key_value (
+                key TEXT NOT NULL PRIMARY KEY,
+                value TEXT
+             )"
+        );
+    }
+    catch (SqliteException e)
+    {
+        // Error creating the table.
+        assert(false, "Error: " ~ e.msg);
+    }
     Socket server = new TcpSocket(); //Make a server socket listening on port 8080
     server.setOption(SocketOptionLevel.SOCKET, SocketOption.REUSEADDR, true);
     server.blocking(false);
@@ -56,6 +86,7 @@ void main() {
 	SocketSet checkWrite = new SocketSet();
     
     LuaFunction DMUD_ReceivedBytes;
+    LuaFunction DMUD_ReceivedLine;
     LuaFunction DMUD_ClientConnected;
     LuaFunction DMUD_ClientDisconnected;
     LuaFunction DMUD_Heartbeat;
@@ -67,12 +98,13 @@ void main() {
     		//Go through each of our special functions and make it a noop in case it's not defined
     		lua.doString(q"EOS
             local noop = function () return true end
-            local keys = {'DMUD_ReceivedBytes','DMUD_ClientConnected','DMUD_ClientDisconnected','DMUD_Heartbeat'}
+            local keys = {'DMUD_ReceivedBytes','DMUD_ReceivedLine','DMUD_ClientConnected','DMUD_ClientDisconnected','DMUD_Heartbeat'}
             for _,key in ipairs(keys) do
                 if _G[key] == nil then _G[key] = noop end
             end
 EOS");
     		DMUD_ReceivedBytes = lua.get!LuaFunction("DMUD_ReceivedBytes");
+    		DMUD_ReceivedLine = lua.get!LuaFunction("DMUD_ReceivedLine");
     		DMUD_ClientDisconnected = lua.get!LuaFunction("DMUD_ClientDisconnected");
     		DMUD_ClientConnected = lua.get!LuaFunction("DMUD_ClientConnected");
     		DMUD_Heartbeat = lua.get!LuaFunction("DMUD_Heartbeat");
@@ -93,6 +125,44 @@ EOS");
                 }
                 return 0;
             };
+            lua["keyval_put"] = (char[] key, char[] value) { //Put something in the key value store
+                try { //Create our key/value store.
+                     auto query = db.query("INSERT OR REPLACE INTO key_value (key, value) VALUES (:key, :value)");
+                     query.params.bind(":key",key).bind(":value",value);
+                     query.execute();                     
+                }
+                catch (SqliteException e) {
+                    assert(false, "Error: " ~ e.msg);
+                }
+                immutable(char)[] newValue = value.dup;
+                immutable(char)[] newKey = key.dup;
+                keyValue[newKey] = newValue;
+            };
+            lua["keyval_get"] = (char[] key) { //Put something in the key value store
+                const(immutable(char))[] newKey = key.dup;
+                if (!(newKey in keyValue)) {
+                    try {
+                        auto query = db.query("SELECT value FROM key_value WHERE key == :key");
+                        query.params.bind(":key",key);
+                        query.execute();
+                        foreach (row; query.rows) {
+                            keyValue[newKey] = row["value"].get!string();
+                            return keyValue[newKey];
+                        }
+                    }
+                    catch (SqliteException e) {
+                        assert(false, "Error: " ~ e.msg);
+                    }
+                } else {
+                    return keyValue[newKey];
+                }
+                
+                return null;
+            };         
+            lua["sha1"] = (char[] input) {
+                ubyte[20] hash = sha1Of(input);
+                return toHexString(hash);
+            };   
     	}
     	checkRead.reset(); //Reset checkRead and add server socket
     	checkRead.add(server);
@@ -118,33 +188,7 @@ EOS");
 	                clients.remove(key);
 	                break;
                 } else {
-                    printf("%d bytes received",received);
-                    
-                    for (int i = 0;i < received;i++) {
-                        char current_char = buffer[i]; 
-                        printf("%d,",current_char);
-                        if (current_char == IAC) { //command incoming!
-                            if (received - i > 0) { //We have more buffer to read
-                                if (buffer[i+1] == DO && received - i > 1) { //We have a DO and another byte to read
-                                    if (buffer[i+2] == MCCP) { // IAC DO MCCP
-                                        //Confirm with subnegot. per http://tintin.sourceforge.net/mccp/ 
-                                        clients[key].send([IAC,SB,MCCP,IAC,SE]);
-                                        clients[key].mccpCompressor = new Compress;
-                                        clients[key].mccp = true;
-                                    }
-                                    else if (buffer[i+2] == MXP) { //IAC DO MXP
-                                        clients[key].send([IAC,SB,MXP,IAC,SE]);
-                                        clients[key].mxp = true;
-                                    }
-                                    else if (buffer[i+2] == GMCP) {
-                                        clients[key].send([IAC,SB,GMCP,IAC,SE]);
-                                        clients[key].gmcp = true;                                        
-                                    }
-                                }
-                                
-                            }
-                        }
-                    }
+                    c.toRecv ~= buffer[0..received];
                     DMUD_ReceivedBytes(key,buffer);
                 }
             }
@@ -156,6 +200,58 @@ EOS");
                      c.socket.send(c.toSend);
                      c.toSend = "".dup;
                  } 
+	        }
+	        if (c.toRecv.length > 0) {
+	            char[] temp_buffer;
+	            bool iac_mode = false;
+	            bool do_mode = false;
+	            bool dont_mode = false;
+	            printf("Client buffer length: %d\r\n",c.toRecv.length);
+	            for (int i = 0;i < c.toRecv.length;i++) {
+	                char current_char = c.toRecv[i]; 
+                    printf("%d,",current_char);
+                    if (current_char == IAC) { iac_mode = true; }
+                    if (iac_mode && current_char == DO) { do_mode = true; } 
+                    if (iac_mode && current_char == DONT) { dont_mode = true; }
+                    if (iac_mode && do_mode && current_char != DO) { //IAC DO
+                        if (current_char == MCCP) { //IAC DO MCCP
+                            //Confirm with subnegot. per http://tintin.sourceforge.net/mccp/ 
+                            c.send([IAC,SB,MCCP,IAC,SE]);
+                            c.mccpCompressor = new Compress;
+                            c.mccp = true;                                
+                        }
+                        else if (current_char == MXP) {
+                            c.send([IAC,SB,MXP,IAC,SE]);
+                            c.mxp = true;                                
+                        }
+                        else if (current_char == GMCP) {
+                            c.send([IAC,SB,GMCP,IAC,SE]);
+                            c.gmcp = true;
+                        }
+                        //We either dealt with it or don't support it
+                        iac_mode = false;
+                        do_mode = false;
+                        c.toRecv = c.toRecv[i+1..$];
+                        break;
+                    }
+                    if (iac_mode && dont_mode && current_char != DONT) { //IAC DON'T
+                        if (current_char == MCCP) { c.mccp = false; }
+                        if (current_char == MXP) { c.mxp = false; }
+                        if (current_char == GMCP) { c.gmcp = false; }
+                        iac_mode = false;
+                        dont_mode = false;
+                        c.toRecv = c.toRecv[i+1..$];
+                        break;                        
+                    }
+                    if (!iac_mode && current_char < 127 && current_char != CR && current_char != LF) { temp_buffer ~= current_char; } //Only add basic ASCII to this buffer
+                    if (current_char == LF) {
+                        if (temp_buffer.length > 0) { DMUD_ReceivedLine(key,temp_buffer); }
+                        //Clear our toRecv buffer up to i
+                        c.toRecv = c.toRecv[i+1..$];
+                        break;
+                    } 
+                    
+	            }
 	        }
 	        DMUD_Heartbeat(key); //Call the heartbeat function for each client, each tick.
         }
