@@ -9,9 +9,12 @@ import std.digest.sha;
 import core.thread;
 import luad.all;
 import d2sqlite3;
+import std.base64;
 Client[int] clients;
 const Duration instant = dur!"hnsecs"(0);
+//Telnet OPTS
 immutable char IAC = 255;
+immutable char GA = 249;
 immutable char CR = 13;
 immutable char LF = 10;
 immutable char SB = 250; //Subnegotiation begin
@@ -22,7 +25,9 @@ immutable char DONT = 254;
 immutable char MCCP = 86;
 immutable char MXP = 91;
 immutable char GMCP = 201;
-string[string] keyValue;
+
+string[string] keyValue; //Local cache of the key/value store
+int[] clientsToDelete; //Array of clients to be deleted.
 
 class Client {
     Socket socket;
@@ -37,17 +42,26 @@ class Client {
     }
     bool send (char[] message) {        
         if (this.mccp) { //compress if we're in mccp mode // 
-            message = cast(char[])this.mccpCompressor.compress(cast(void[])message) ~ cast(char[])this.mccpCompressor.flush(Z_FULL_FLUSH);
+            message = cast(char[])this.mccpCompressor.compress(cast(void[])message.dup);
+            message ~= cast(char[])this.mccpCompressor.flush(Z_SYNC_FLUSH );
         }
         SocketSet checkWrite = new SocketSet();
         checkWrite.add(this.socket);
         if (Socket.select(null,checkWrite,null,instant) > 0) {
             this.socket.send(message);
         } else {
+            writeln("We couldn't send the message just yet!");
             this.toSend ~= message;
         }
         return true;
     }
+}
+char[] sha1b64 (char[] input) { //Returns a base64 encoded SHA1
+    auto ctx = makeDigest!SHA1();
+    ctx.put(cast(ubyte[])input);
+    ubyte[] hash = ctx.finish();
+    char[] encoded = Base64.encode(hash);
+    return encoded;
 }
 void main() {
     auto lua = new LuaState; //Create the Lua state and initialize the libraries
@@ -118,9 +132,7 @@ EOS");
     		};
             lua["disconnectClient"] = (int client) {
                 if (client in clients) {
-                    clients[client].socket.shutdown(SocketShutdown.BOTH);
-                    clients[client].socket.close();
-                    clients.remove(client);
+                    clientsToDelete ~= client;
                     return 1;
                 }
                 return 0;
@@ -140,13 +152,16 @@ EOS");
             };
             lua["keyval_get"] = (char[] key) { //Put something in the key value store
                 const(immutable(char))[] newKey = key.dup;
+                writeln("Requested: "~newKey);
                 if (!(newKey in keyValue)) {
+                    writeln("Not found in cache, going to SQLite");
                     try {
-                        auto query = db.query("SELECT value FROM key_value WHERE key == :key");
-                        query.params.bind(":key",key);
-                        query.execute();
+                        auto query = db.query("SELECT value FROM key_value WHERE key == \""~newKey~"\"");
+                        
                         foreach (row; query.rows) {
+                            
                             keyValue[newKey] = row["value"].get!string();
+                            writeln("Value: "~keyValue[newKey]);
                             return keyValue[newKey];
                         }
                     }
@@ -154,27 +169,34 @@ EOS");
                         assert(false, "Error: " ~ e.msg);
                     }
                 } else {
+                    writeln("Found and returning!");
                     return keyValue[newKey];
                 }
                 
                 return null;
             };         
-            lua["sha1"] = (char[] input) {
-                ubyte[20] hash = sha1Of(input);
-                return toHexString(hash);
-            };   
+            lua["sha1_raw"] = &sha1b64;  
     	}
     	checkRead.reset(); //Reset checkRead and add server socket
     	checkRead.add(server);
     	if (Socket.select(checkRead,null,null,instant) > 0) {
     	    Socket client = server.accept();
-    	    client.blocking(false);
+    	    //client.blocking(false);
     	    clientCount++;
     	    clients[clientCount] = new Client(client);
     	    DMUD_ClientConnected(clientCount);
     	    clients[clientCount].send([IAC,WILL,MCCP]);
     	    clients[clientCount].send([IAC,WILL,MXP]);
     	    clients[clientCount].send([IAC,WILL,GMCP]);
+	    }
+    	if (clientsToDelete.length > 0) {
+    	    foreach (int client; clientsToDelete) {
+        	    clients[client].socket.shutdown(SocketShutdown.BOTH);
+                clients[client].socket.close();
+                DMUD_ClientDisconnected(client);
+                clients.remove(client);
+        	}
+    	    clientsToDelete = clientsToDelete.init;
 	    }
 	    foreach (int key, Client c; clients) {
 	        checkRead.reset();

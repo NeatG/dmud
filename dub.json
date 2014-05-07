@@ -7,5 +7,5 @@
 		"luad": "~master",
 		"d2sqlite3": ">=0.1.0"
 	},
-	"libs": ["sqlite3"],
+	"libs": ["sqlite3"]
 }
