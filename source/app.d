@@ -66,7 +66,7 @@ char[] sha1b64 (char[] input) { //Returns a base64 encoded SHA1
 void main() {
     auto lua = new LuaState; //Create the Lua state and initialize the libraries
     lua.openLibs();
-    int lastModifiedTimeLua = 0; //MTime for the Lua file
+    long lastModifiedTimeLua = 0; //MTime for the Lua file
     Database db;
     try
     {
